@@ -1,0 +1,427 @@
+<script type="text/javascript">
+
+var saveAs = saveAs
+  || (typeof navigator !== "undefined" &&
+      navigator.msSaveOrOpenBlob && navigator.msSaveOrOpenBlob.bind(navigator))
+  || (function(view) {
+	"use strict";
+	if (typeof navigator !== "undefined" &&
+	    /MSIE [1-9]\./.test(navigator.userAgent)) {
+		return;
+	}
+	var
+		  doc = view.document
+		, get_URL = function() {
+			return view.URL || view.webkitURL || view;
+		}
+		, save_link = doc.createElementNS("http://www.w3.org/1999/xhtml", "a")
+		, can_use_save_link = !view.externalHost && "download" in save_link
+		, click = function(node) {
+			var event = doc.createEvent("MouseEvents");
+			event.initMouseEvent(
+				"click", true, false, view, 0, 0, 0, 0, 0
+				, false, false, false, false, 0, null
+			);
+			node.dispatchEvent(event);
+		}
+		, webkit_req_fs = view.webkitRequestFileSystem
+		, req_fs = view.requestFileSystem || webkit_req_fs || view.mozRequestFileSystem
+		, throw_outside = function(ex) {
+			(view.setImmediate || view.setTimeout)(function() {
+				throw ex;
+			}, 0);
+		}
+		, force_saveable_type = "application/octet-stream"
+		, fs_min_size = 0
+		, arbitrary_revoke_timeout = 10
+		, revoke = function(file) {
+			var revoker = function() {
+				if (typeof file === "string") { // file is an object URL
+					get_URL().revokeObjectURL(file);
+				} else { 
+					file.remove();
+				}
+			};
+			if (view.chrome) {
+				revoker();
+			} else {
+				setTimeout(revoker, arbitrary_revoke_timeout);
+			}
+		}
+		, dispatch = function(filesaver, event_types, event) {
+			event_types = [].concat(event_types);
+			var i = event_types.length;
+			while (i--) {
+				var listener = filesaver["on" + event_types[i]];
+				if (typeof listener === "function") {
+					try {
+						listener.call(filesaver, event || filesaver);
+					} catch (ex) {
+						throw_outside(ex);
+					}
+				}
+			}
+		}
+		, FileSaver = function(blob, name) {
+			var
+				  filesaver = this
+				, type = blob.type
+				, blob_changed = false
+				, object_url
+				, target_view
+				, dispatch_all = function() {
+					dispatch(filesaver, "writestart progress write writeend".split(" "));
+				}
+				, fs_error = function() {
+					if (blob_changed || !object_url) {
+						object_url = get_URL().createObjectURL(blob);
+					}
+					if (target_view) {
+						target_view.location.href = object_url;
+					} else {
+						var new_tab = view.open(object_url, "_blank");
+						if (new_tab == undefined && typeof safari !== "undefined") {
+							view.location.href = object_url
+						}
+					}
+					filesaver.readyState = filesaver.DONE;
+					dispatch_all();
+					revoke(object_url);
+				}
+				, abortable = function(func) {
+					return function() {
+						if (filesaver.readyState !== filesaver.DONE) {
+							return func.apply(this, arguments);
+						}
+					};
+				}
+				, create_if_not_found = {create: true, exclusive: false}
+				, slice
+			;
+			filesaver.readyState = filesaver.INIT;
+			if (!name) {
+				name = "download";
+			}
+			if (can_use_save_link) {
+				object_url = get_URL().createObjectURL(blob);
+				save_link.href = object_url;
+				save_link.download = name;
+				click(save_link);
+				filesaver.readyState = filesaver.DONE;
+				dispatch_all();
+				revoke(object_url);
+				return;
+			}
+			if (view.chrome && type && type !== force_saveable_type) {
+				slice = blob.slice || blob.webkitSlice;
+				blob = slice.call(blob, 0, blob.size, force_saveable_type);
+				blob_changed = true;
+			}
+			if (webkit_req_fs && name !== "download") {
+				name += ".download";
+			}
+			if (type === force_saveable_type || webkit_req_fs) {
+				target_view = view;
+			}
+			if (!req_fs) {
+				fs_error();
+				return;
+			}
+			fs_min_size += blob.size;
+			req_fs(view.TEMPORARY, fs_min_size, abortable(function(fs) {
+				fs.root.getDirectory("saved", create_if_not_found, abortable(function(dir) {
+					var save = function() {
+						dir.getFile(name, create_if_not_found, abortable(function(file) {
+							file.createWriter(abortable(function(writer) {
+								writer.onwriteend = function(event) {
+									target_view.location.href = file.toURL();
+									filesaver.readyState = filesaver.DONE;
+									dispatch(filesaver, "writeend", event);
+									revoke(file);
+								};
+								writer.onerror = function() {
+									var error = writer.error;
+									if (error.code !== error.ABORT_ERR) {
+										fs_error();
+									}
+								};
+								"writestart progress write abort".split(" ").forEach(function(event) {
+									writer["on" + event] = filesaver["on" + event];
+								});
+								writer.write(blob);
+								filesaver.abort = function() {
+									writer.abort();
+									filesaver.readyState = filesaver.DONE;
+								};
+								filesaver.readyState = filesaver.WRITING;
+							}), fs_error);
+						}), fs_error);
+					};
+					dir.getFile(name, {create: false}, abortable(function(file) {
+						// delete file if it already exists
+						file.remove();
+						save();
+					}), abortable(function(ex) {
+						if (ex.code === ex.NOT_FOUND_ERR) {
+							save();
+						} else {
+							fs_error();
+						}
+					}));
+				}), fs_error);
+			}), fs_error);
+		}
+		, FS_proto = FileSaver.prototype
+		, saveAs = function(blob, name) {
+			return new FileSaver(blob, name);
+		}
+	;
+	FS_proto.abort = function() {
+		var filesaver = this;
+		filesaver.readyState = filesaver.DONE;
+		dispatch(filesaver, "abort");
+	};
+	FS_proto.readyState = FS_proto.INIT = 0;
+	FS_proto.WRITING = 1;
+	FS_proto.DONE = 2;
+
+	FS_proto.error =
+	FS_proto.onwritestart =
+	FS_proto.onprogress =
+	FS_proto.onwrite =
+	FS_proto.onabort =
+	FS_proto.onerror =
+	FS_proto.onwriteend =
+		null;
+
+	return saveAs;
+}(
+	   typeof self !== "undefined" && self
+	|| typeof window !== "undefined" && window
+	|| this.content
+));
+
+if (typeof module !== "undefined" && module !== null) {
+  module.exports = saveAs;
+} else if ((typeof define !== "undefined" && define !== null) && (define.amd != null)) {
+  define([], function() {
+    return saveAs;
+  });
+}
+
+
+function fnExcelReport(id, name) {
+    var tab_text = '\uFEFF';
+    tab_text = tab_text + '<html xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40">';
+    tab_text = tab_text + '<head>';
+    tab_text = tab_text + '<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />';
+    tab_text = tab_text + '<meta name="ProgId" content="Excel.Sheet" />';
+    tab_text = tab_text + '<meta name="Generator" content="Microsoft Excel 11" />';
+    tab_text = tab_text + '<title>Excel Export</title>';
+    tab_text = tab_text +'<!--[if gte mso 9]><xml><x:ExcelWorkbook><x:ExcelWorksheets><x:ExcelWorksheet>';
+    tab_text = tab_text + '<x:Name>Excel Sheet</x:Name>';
+    tab_text = tab_text + '<x:WorksheetOptions><x:Panes></x:Panes></x:WorksheetOptions></x:ExcelWorksheet>';
+    tab_text = tab_text + '</x:ExcelWorksheets></x:ExcelWorkbook>';
+    tab_text = tab_text + '</xml><![endif]--></head><body>';
+    tab_text = tab_text + '<table border="1px">';
+    var exportTable = $('#' + id).clone();
+    exportTable.find('input').each(function (index, elem) { $(elem).remove(); });
+    tab_text = tab_text + exportTable.html();
+    tab_text = tab_text + '</table></body></html>';
+    tab_text = tab_text.replace(/<img[^>]*>/gi,"");
+    var fileName = name + '_' + parseInt(Math.random() * 10000000000) + '.xls';
+    var blob = new Blob([tab_text], { type: "application/vnd.ms-excel" })
+    window.saveAs(blob, fileName);
+}
+
+</script>  
+
+<button id="btnExport" onclick="javascript:fnExcelReport('myTable', 'Excel_export_');"> Export Data to Excel </button><br/><br/>
+#set($thePlan = $pageParameters.Plans.toLucene)
+#set($theSWid = $pageParameters.SW_ID.value)
+#set($theDocType = $pageParameters.Document_Type.toLucene.replace(" / ", "/"))
+#set($theAllDocs = $pageParameters.Use_All_Documents.value)
+#if($theAllDocs)
+    #set($FERs =$transaction.workItems.search.query("PLAN:$thePlan AND type:FER"))
+#else
+    #set($FERs =$transaction.workItems.search.query("PLAN:$thePlan AND type:FER AND document.id:$theDocType"))
+#end
+Number of FER's :<b> $FERs.size </b><br/><br/>
+#set($ps=0)
+#set($fl=0)
+#set($ti=0)
+#set($sw=0)
+#set($nr=0)
+#set($extraFER = $pageParameters.Extra_FER_Attributes.values())
+<table id="myTable" border="1">
+    <tr>
+        <th> FER's </th>
+		<th> Document Type</th>
+		#if($extraFER.contains("plannedIn"))
+		<th> Planned In </th>
+		#end
+		#if($extraFER.contains("reqClass"))
+        <th> Class </th>
+		#end
+		#if($extraFER.contains("status"))
+		<th> Status </th>
+		#end
+		#if($extraFER.contains("tag"))
+		<th> Tag TMS3/TCM2/SGC2 </th>
+		#end
+		#if($extraFER.contains("tagTMS4"))
+        <th> Tag TMS4 </th>
+		#end
+		#if($extraFER.contains("tagTMS5"))
+		<th> Tag TMS5/SGC3 </th>
+		#end
+		#if($extraFER.contains("tagTMS6"))
+		<th> Tag TMS6 </th>
+		#end
+        <th> Test case </th>
+            #set ($output = $theSWid.split(','))
+            #set($counter = 0)
+            #foreach($o in $output)
+            #set($counter = $counter+1)
+                <th>
+                    SW_ID : $o
+                </th>
+            #end
+    </tr>
+    #if($FERs.size > 0)
+    <tr>
+        <td>
+            #foreach($FER in $FERs)
+                        #if($pageParameters.Other_Valid_FPC.toLucene == '"*"')
+                        	#set($TCs = $transaction.workItems.search.query("type:TC AND linkedWorkItems:$FER.fields.id.get() AND validTransmissionManagementSystem.KEY: $pageParameters.validTransmissionManagementSystem.toLucene"))
+                    	#else                        	    
+                        	 #set($TCs = $transaction.workItems.search.query("type:TC AND linkedWorkItems:$FER.fields.id.get() AND validTransmissionManagementSystem.KEY: $pageParameters.validTransmissionManagementSystem.toLucene AND otherValidFPC.KEY:$pageParameters.Other_Valid_FPC.toLucene"))
+                        #end
+                   #if ($pageParameters.Display.toLucene != "(tcs)")
+                    <tr>
+                    <td>
+                        $FER.render.withLinks <br>
+                    </td>
+                    <td>
+                        $FER.fields.module.get.render <br>
+					</td>
+					#if($extraFER.contains("plannedIn"))
+					<td>
+						$FER.fields.plannedIn.render
+                    </td>
+					#end
+					#if($extraFER.contains("reqClass"))
+					<td>
+						$FER.fields.reqClass.render
+                    </td>
+					#end
+					#if($extraFER.contains("status"))
+					<td>
+						$FER.fields.status.render
+                    </td>
+					#end
+					#if($extraFER.contains("tag"))
+					<td>
+						$FER.fields.tag.render
+                    </td>
+					#end
+					#if($extraFER.contains("tagTMS4"))
+					<td>
+						$FER.fields.tagTMS4.render
+                    </td>
+					#end
+					#if($extraFER.contains("tagTMS5"))
+					<td>
+						$FER.fields.tagTMS5.render
+                    </td>
+					#end
+					#if($extraFER.contains("tagTMS6"))
+					<td>
+						$FER.fields.tagTMS6.render
+                    </td>
+                   #end
+					#end
+                    #if ($pageParameters.Display.toLucene != "(reqs)")
+                    <td class="baseCell">
+                        #foreach($TC in $TCs)
+                            <tr>
+                                <td/><td/>
+								#foreach($count in $extraFER)
+								<td/>
+								#end
+                                <td>
+                                    $TC.render.withLinks
+                                    $TC.fields.status.render
+                                    #set($OK = "NOK")
+                                    #set ($output = $theSWid.split(','))
+                                    #foreach($o in $output)
+                                        #set($TestRuns =$transaction.testRuns.search.query("SWrelease:$o"))
+                                            <td class="baseCell">
+                                            #foreach($run in $TestRuns)
+                                                #set($res = $run.fields.records.byTestCase($TC.fields.id.get))
+                                                #foreach($r in $res)
+                                                    $r.fields.result.render <br>
+                                                    #if($r.fields.result.optionId || $r.fields.result.optionId=="paused")
+                                                        #set($OK = "OK")
+                                                    #end
+                                                    #if($counter < 2)
+                                                      #if($r.fields.result.get.id == "Test_issue")
+                                                      	#set($ti=$ti+1)
+                                                      #elseif($r.fields.result.get.id == "SW_issue")
+                                                      	#set($sw=$sw+1)
+                                                      #elseif($r.fields.result.get.id == "passed" || $r.fields.result.get.id == "Analysed_passed")
+                                                      	#set($ps=$ps+1)
+                                                      #elseif($r.fields.result.get.id == "failed" || $r.fields.result.get.id == "blocked")
+                                                      	#set($fl=$fl+1)
+                                                      #else
+                                                      	#set($nr=$nr+1)
+                                                      #end
+                                                      #if($r.fields.result.get.id == "SW_issue" || $r.fields.result.get.id == "Test_issue")
+                                                          #set($comment = $r.getOldApi.getComment().toString())
+                                                          <td class="baseCell">
+                                                              #set($index = $comment.lastIndexOf("Retest comment"))
+                                                              #if($index >-1)
+                                                              $comment.substring($index)
+                                                              #else
+                                                              <b> Retest Comment not available <b/>
+                                                              #end
+                                                          </td>
+                                                      #else
+                                                          <td/>											
+                                                      #end
+                                                    #end
+                                                #end 
+                                            #end
+                                    #end
+                        #end
+                        #end
+            #end
+    #end
+</table>
+#if ($pageParameters.Display.toLucene == "(reqs)")
+#set($ps="NA")
+#set($fl="NA")
+#set($ti="NA")
+#set($sw="NA")
+#set($nr="NA")
+#end
+Status of TC's<br/><br/>
+Passed:<b> $ps </b><br/><br/>
+Failed:<b> $fl </b><br/><br/>
+Test issue:<b> $ti </b><br/><br/>
+SW issue:<b>  $sw </b><br/><br/>
+Not run:<b>  $nr </b><br/><br/>
+<style>
+    .baseCell
+    {
+    border-top: 1px solid grey; 
+    border-collapse: collapse;
+    vertical-align: top;
+    text-align: left;
+    }
+	
+	.hideCell
+	{
+	display:none;
+	}
+</style>
